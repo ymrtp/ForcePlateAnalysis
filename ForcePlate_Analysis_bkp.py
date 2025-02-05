@@ -1,21 +1,17 @@
 import streamlit as st
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import math
 import os
-import time
-import io
-import imageio.v2 as imageio  # 警告回避のため v2 としてインポート
-
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.collections import LineCollection
 from scipy.signal import find_peaks
-from functools import lru_cache  # ここではキャッシュは使わない（引数に非ハッシュ可能な ds_data が入るため）
-import concurrent.futures
-import imageio
+
+from matplotlib.animation import FuncAnimation
+import matplotlib.animation as animation
+from functools import lru_cache
+import time
 
 # 出力用フォルダの定義（存在しない場合は作成）
 OUTPUT_FOLDER = "output"
@@ -657,21 +653,20 @@ with tabs[7]:
 # Movie 作成
 # ─────────────────────────────
 
-# まず、filtered_data からダウンサンプリングしたデータを作成し、グローバル変数として設定
-ds_data = filtered_data.iloc[::20, :].reset_index(drop=True)
-global_ds_data = ds_data  # スレッド間で共有するためのグローバル変数
-num_frames = len(ds_data)
-base_name = os.path.splitext(file_name)[0]
-
-# グローバル変数で累積データを保持する
-cumulative_trace_x = [[] for _ in range(4)]
-cumulative_trace_y = [[] for _ in range(4)]
 
 
-
-def render_frame(frame_index):
-    ds = global_ds_data  # グローバルなダウンサンプリング済みデータ
-    fig, ax = plt.subplots(figsize=(4, 6.08))
+def create_csv_animation(filtered_data, file_name, normalization_value, output_folder=OUTPUT_FOLDER, fps=50, dpi=150):
+    """
+    CSVデータからアニメーションを生成し、指定フォルダに保存します。
+    出力ファイルのパスを返します。
+    """
+    base_name = os.path.splitext(file_name)[0]
+    output_path = os.path.join(output_folder, f"{base_name}_animation.mp4")
+    
+    start_time = time.time()
+    
+    # Figureを作成し、指定されたサイズを適用
+    fig, ax = plt.subplots(figsize=(6, 8))
     ax.set_xlim(-400, 400)
     ax.set_ylim(-600, 600)
     ax.set_aspect('equal', adjustable='box')
@@ -679,118 +674,86 @@ def render_frame(frame_index):
     ax.set_ylabel('COPy (mm)', fontsize=8)
     ax.tick_params(axis='both', which='major', labelsize=6)
     
-    plate_indices_csv = [(4, 5, 1, 2, 3),
-                           (10, 11, 7, 8, 9),
-                           (16, 17, 13, 14, 15),
-                           (22, 23, 19, 20, 21)]
+    # CSV用のプレートデータ列オフセットと色設定
+    plate_indices_csv = [(4, 5, 1, 2, 3), (10, 11, 7, 8, 9), (16, 17, 13, 14, 15), (22, 23, 19, 20, 21)]
     colors_csv = ['r', 'g', 'b', 'm']
     
-    # 各プレートごとの処理
-    for idx, (copx_idx, copy_idx, fx_idx, fy_idx, fz_idx) in enumerate(plate_indices_csv):
-        try:
-            copx = ds.iloc[frame_index, copx_idx]
-            copy = ds.iloc[frame_index, copy_idx]
-            fx = ds.iloc[frame_index, fx_idx]
-            fy = ds.iloc[frame_index, fy_idx]
-            fz = ds.iloc[frame_index, fz_idx]
-        except Exception:
-            continue
-        
-        if invert_x:
-            copx = -copx
-            fx = -fx
-        if invert_y:
-            copy = -copy
-            fy = -fy
-        if copx == 0 and copy == 0:
-            continue
-        
-        center_x, center_y = plate_centers[idx]
-        copx += center_x
-        copy += center_y
-        
-        force_magnitude = math.sqrt(fx**2 + fy**2 + fz**2) / (math.sqrt(fx**2 + fy**2) if (fx**2+fy**2) != 0 else 1)
-        length = force_magnitude / normalization_value * 100
-        end_x = copx + length * fx
-        end_y = copy + length * fy
-        
-        # 累積データに追加
-        cumulative_trace_x[idx].extend([copx, end_x])
-        cumulative_trace_y[idx].extend([copy, end_y])
-        
-        # 現在のフレームの点と矢印を描画
-        ax.plot(copx, copy, 'o', color=colors_csv[idx], markersize=3)
-        ax.plot([copx, end_x], [copy, end_y], color=colors_csv[idx], linewidth=1.5)
+    # 各プレートごとのプロット要素を初期化
+    dots = [ax.plot([], [], color=color, marker='o', markersize=5)[0] for color in colors_csv]
+    lines = [ax.plot([], [], color=color, linewidth=2)[0] for color in colors_csv]
+    trace_lines = [ax.plot([], [], color=color, linewidth=1, alpha=0.3)[0] for color in colors_csv]
     
-    # 各プレートごとに累積トレースを一度だけ描画（内側のループで変数名を上書きしないように別の変数名を使用）
-    for j in range(len(plate_indices_csv)):
-        if cumulative_trace_x[j] and cumulative_trace_y[j]:
-            ax.plot(cumulative_trace_x[j], cumulative_trace_y[j], color=colors_csv[j], linewidth=1, alpha=0.5)
+    # データを50Hzにダウンサンプリング（1000Hz -> 50Hz）
+    ds_data = filtered_data.iloc[::20, :].reset_index(drop=True)
+
+    # フレーム更新関数（改善版）
+    def update(num):
+        for idx, (copx_idx, copy_idx, fx_idx, fy_idx, fz_idx) in enumerate(plate_indices_csv):
+            # CSVから各成分を取得
+            copx = ds_data.iloc[num, copx_idx]
+            copy = ds_data.iloc[num, copy_idx]
+            fx = ds_data.iloc[num, fx_idx]
+            fy = ds_data.iloc[num, fy_idx]
+            fz = ds_data.iloc[num, fz_idx]
+            
+            # 反転設定に従って、X, Y 成分を反転
+            if invert_x:
+                copx = -copx
+                fx = -fx
+            if invert_y:
+                copy = -copy
+                fy = -fy
+            
+            # 両方ゼロならスキップ
+            if copx == 0 and copy == 0:
+                dots[idx].set_data([], [])
+                lines[idx].set_data([], [])
+                continue
+            
+            # ユーザー設定のプレート中心座標を適用
+            center_x, center_y = plate_centers[idx]
+            copx += center_x
+            copy += center_y
+            
+            force_magnitude = math.sqrt(fx**2 + fy**2 + fz**2) / (math.sqrt(fx**2 + fy**2) if (fx**2 + fy**2) != 0 else 1)
+            length = force_magnitude / normalization_value * 100
+            end_x = copx + length * fx
+            end_y = copy + length * fy
+            
+            # 既存のトレースに追加
+            if num > 0:
+                prev_x, prev_y = trace_lines[idx].get_data()
+                new_x = np.append(prev_x, [copx, end_x])
+                new_y = np.append(prev_y, [copy, end_y])
+                trace_lines[idx].set_data(new_x, new_y)
+            
+            dots[idx].set_data([copx], [copy])
+            lines[idx].set_data([copx, end_x], [copy, end_y])
+        
+        ax.set_title(f"{base_name}\nTime = {ds_data.iloc[num, 0]:.2f} s", fontsize=8)
+        return dots + lines + trace_lines
     
-    current_time = ds.iloc[frame_index, 0]
-    ax.set_title(f"{base_name}\nTime = {current_time:.2f} s", fontsize=8)
+    ani = FuncAnimation(fig, update, frames=len(ds_data), interval=20, blit=True)
     
-    # BytesIO に保存して画像を取得
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png')
-    buf.seek(0)
-    img = imageio.imread(buf)
+    # 動画の保存（指定された倍速で保存）
+    ani.save(output_path, writer='ffmpeg', fps=fps, dpi=dpi)
     plt.close(fig)
-    return img
-
-
-
-def render_all_frames(num_frames, max_workers=4):
-    """
-    ThreadPoolExecutor を用いて、各フレームの画像を並列処理で生成します。
-    """
-    frames = [None] * num_frames
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_frame = {executor.submit(render_frame, i): i for i in range(num_frames)}
-        for future in concurrent.futures.as_completed(future_to_frame):
-            i = future_to_frame[future]
-            try:
-                frames[i] = future.result()
-            except Exception as exc:
-                st.error(f"Frame {i} generated an exception: {exc}")
-    return frames
-
-def create_csv_animation(filtered_data, file_name, normalization_value, output_folder="C:\\temp", fps=25):
-    """
-    CSVデータからアニメーションを生成し、動画ファイルとして保存する関数。
-    """
-    base_name = os.path.splitext(file_name)[0]
-    output_path = os.path.join(output_folder, f"{base_name}_animation.mp4")
-    
-    # 画像サイズ調整
-    global_ds_data["frame_height"] = 608  # 16の倍数に調整
-    global_ds_data["frame_width"] = 400
-
-    start_time = time.time()
-    st.info("Generating frames (this may take a while)...")
-    frames = render_all_frames(num_frames, max_workers=4)
-    elapsed = time.time() - start_time
-    st.write(f"Frames generated in {elapsed:.2f} seconds.")
-    
-    st.info("Encoding video using imageio and ffmpeg...")
-    try:
-        imageio.mimwrite(output_path, frames, fps=fps, quality=8, macro_block_size=1)
-        st.success("Video encoded successfully!")
-    except Exception as e:
-        st.error(f"Video encoding failed: {e}")
-    
-    total_time = time.time() - start_time
-    st.write(f"Total movie creation time: {total_time:.2f} seconds.")
+    elapsed_time = time.time() - start_time
+    print(f"Animation for {file_name} completed in {elapsed_time:.2f} seconds.")
     return output_path
+
 
 # ─────────────────────────────
 # Movie タブ：CSVデータから生成したムービーの作成と表示
 # ─────────────────────────────
+
+
+# Movie タブ：CSVデータから生成したムービーの作成と表示
 with tabs[8]:
     st.subheader("Movie Creation and Display")
     if st.button("Create Animation"):
         with st.spinner("Creating animation from CSV data..."):
-            # 正規化値の決定（従来の処理）
+            # 正規化値の決定
             window = 25
             max_smoothed_norms = []
             for plate in range(4):
@@ -811,10 +774,20 @@ with tabs[8]:
         st.success("Animation created successfully!")
         st.write("Video saved at:", output_video_path)
         
+        # ファイルサイズの確認（オプション）
         try:
             file_size = os.path.getsize(output_video_path)
             st.write("File size (bytes):", file_size)
         except Exception as e:
             st.error(f"Could not determine file size: {e}")
         
+        # 動画ファイルの表示（直接パスを指定する方法）
         st.video(output_video_path)
+        
+        # もしくは、バイナリ読み込みする方法
+        # try:
+        #     with open(output_video_path, "rb") as video_file:
+        #         video_bytes = video_file.read()
+        #     st.video(video_bytes)
+        # except Exception as e:
+        #     st.error("Video file not found. Please try creating the animation again.")
