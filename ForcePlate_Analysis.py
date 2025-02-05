@@ -751,7 +751,7 @@ def create_csv_animation(filtered_data, file_name, normalization_value, output_f
 # Movie タブ：CSVデータから生成したムービーの作成と表示
 with tabs[8]:
     st.subheader("Movie Creation and Display")
-    if st.button("Create Animation"):
+    if st.button("Create mp4 Animation"):
         with st.spinner("Creating animation from CSV data..."):
             # 正規化値の決定
             window = 25
