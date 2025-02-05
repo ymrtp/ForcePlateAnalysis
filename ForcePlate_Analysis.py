@@ -667,6 +667,13 @@ base_name = os.path.splitext(file_name)[0]
 cumulative_trace_x = [[] for _ in range(4)]
 cumulative_trace_y = [[] for _ in range(4)]
 
+if os.name == "nt":  # Windows
+    output_folder = "C:\\temp"
+else:  # Linux/macOS
+    output_folder = "/tmp"
+
+output_path = os.path.join(output_folder, f"{base_name}_animation.mp4")
+os.makedirs(output_folder, exist_ok=True)  # フォルダがなければ作成
 
 
 def render_frame(frame_index):
@@ -755,7 +762,7 @@ def render_all_frames(num_frames, max_workers=4):
                 st.error(f"Frame {i} generated an exception: {exc}")
     return frames
 
-def create_csv_animation(filtered_data, file_name, normalization_value, output_folder="C:\\temp", fps=25):
+def create_csv_animation(filtered_data, file_name, normalization_value, output_folder=output_folder, fps=25):
     """
     CSVデータからアニメーションを生成し、動画ファイルとして保存する関数。
     """
